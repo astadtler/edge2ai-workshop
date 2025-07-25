@@ -112,9 +112,15 @@ model.set_metric(metric_name="auroc", value=auroc)
 model.set_metric(metric_name="ap", value=ap)
 #cdsw.track_metric("ap", ap)
 
-pickle.dump(randF, open("iot_model.pkl","wb"))
+#pickle.dump(randF, open("iot_model.pkl","wb"))
 
-cdsw.track_file("iot_model.pkl")
+#cdsw.track_file("iot_model.pkl")
 
+#Create SPCS Inference Service
+model.create_service(service_name="EDGE2AI",
+                     service_compute_pool="EDGE2AI",
+                     image_repo="EDGE2AI_REPO",
+                     ingress_enabled=True,
+                     gpu_requests=None)
 time.sleep(15)
 print("Slept for 15 seconds.")
