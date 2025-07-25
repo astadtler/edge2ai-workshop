@@ -1,81 +1,97 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.types import *
-from pyspark.ml.feature import StringIndexer
-from pyspark.ml import Pipeline
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import roc_auc_score, average_precision_score
+#from pyspark.sql import SparkSession
+from snowflake.snowpark import Session
+#from pyspark.sql.types import *
+from snowflake.snowpark.types import StructType, StructField, DoubleType, IntegerType
+#from pyspark.ml.feature import StringIndexer
+from snowflake.ml.modeling.preprocessing import
+#from pyspark.ml import Pipeline
+from snowflake.ml.modeling.pipeline import Pipeline
+#from sklearn.ensemble import RandomForestClassifier
+from snowflake.ml.modeling.ensemble import RandomForestClassifier
+#from sklearn.metrics import roc_auc_score, average_precision_score
+from snowflake.ml.modeling.metrics import roc_auc_score, precision_score
+
 import numpy as np
 import pandas as pd
 import pickle
-import cdsw
+#import cdsw
+from snowflake.ml.registry import Registry
 import os
 import time
 
-spark = SparkSession.builder \
-      .appName("Predictive Maintenance") \
-      .getOrCreate()
+session = Session.builder.config("connection_name", "myconnection").create()
 
-# read 21 colunms large file from HDFS
-schemaData = StructType([StructField("0", DoubleType(), True),
-                         StructField("1", DoubleType(), True),
-                         StructField("2", DoubleType(), True),
-                         StructField("3", DoubleType(), True),
-                         StructField("4", DoubleType(), True),
-                         StructField("5", DoubleType(), True),
-                         StructField("6", DoubleType(), True),     
-                         StructField("7", DoubleType(), True),     
-                         StructField("8", DoubleType(), True),     
-                         StructField("9", DoubleType(), True),     
-                         StructField("10", DoubleType(), True),     
-                         StructField("11", DoubleType(), True),          
-                         StructField("12", IntegerType(), True)])
+# read 21 colunms large file from Snowflake stage
+schemaData = StructType([StructField("C1", DoubleType(), True),
+                     StructField("C2", DoubleType(), True),
+                     StructField("C3", DoubleType(), True),
+                     StructField("C4", DoubleType(), True),
+                     StructField("C5", DoubleType(), True),
+                     StructField("C6", DoubleType(), True),
+                     StructField("C7", DoubleType(), True),
+                     StructField("C8", DoubleType(), True),
+                     StructField("C9", DoubleType(), True),
+                     StructField("C10", DoubleType(), True),
+                     StructField("C11", DoubleType(), True),
+                     StructField("C12", DoubleType(), True),
+                     StructField("C13", IntegerType(), True)])
 
-iot_data = spark.read.schema(schemaData).csv('/user/' 
-                                             + os.environ['HADOOP_USER_NAME'] 
-                                             + '/historical_iot.txt')
-
+iot_data = session.read.schema(schemaData).csv('@edge2ai/historical_iot.txt')
 
 # Create Pipeline
-label_indexer = StringIndexer(inputCol = '12', outputCol = 'label')
-plan_indexer = StringIndexer(inputCol = '1', outputCol = '1_indexed')
-pipeline = Pipeline(stages=[plan_indexer, label_indexer])
+label_indexer = LabelEncoder(input_cols = ["C13"], output_cols = ["LABEL"])
+plan_indexer = LabelEncoder(input_cols = ["C2"], output_cols = ["C2_INDEXED"])
+pipeline = Pipeline(steps=[('plan_indexer', plan_indexer), ('label_indexer', label_indexer)])
 indexed_data = pipeline.fit(iot_data).transform(iot_data)
-(train_data, test_data) = indexed_data.randomSplit([0.7, 0.3])
+(train_data, test_data) = indexed_data.random_split([0.7, 0.3])
 
-pdTrain = train_data.toPandas()
-pdTest = test_data.toPandas()
+#pdTrain = train_data.toPandas()
+#pdTest = test_data.toPandas()
 
 # 12 features
-features = ["1_indexed",
-            "0", 
-            "2", 
-            "3",
-            "4", 
-            "5", 
-            "6",
-            "7", 
-            "8", 
-            "9", 
-            "10",
-            "11"]
+features = ["C2_INDEXED",
+            "C1",
+            "C3",
+            "C4",
+            "C5",
+            "C6",
+            "C7",
+            "C8",
+            "C9",
+            "C10",
+            "C11",
+            "C12"]
 
 param_numTrees = int(sys.argv[1])
 param_maxDepth = int(sys.argv[2])
 param_impurity = 'gini'
 
-randF=RandomForestClassifier(n_jobs=10,
-                             n_estimators=param_numTrees, 
-                             max_depth=param_maxDepth, 
-                             criterion = param_impurity,
-                             random_state=0)
+randF = RandomForestClassifier(n_jobs=10,
+                               n_estimators=param_numTrees,
+                               max_depth=param_maxDepth,
+                               criterion=param_impurity,
+                               random_state=0,
+                               input_cols=features,
+                               label_cols=['LABEL'],
+                               output_cols=['PREDICTIONS'])
+                               )
 
-cdsw.track_metric("numTrees",param_numTrees)
-cdsw.track_metric("maxDepth",param_maxDepth)
-cdsw.track_metric("impurity",param_impurity)
+model.set_metric(metric_name="numTrees",value=param_numTrees)
+model.set_metric(metric_name="maxDepth",value=param_maxDepth)
+model.set_metric(metric_name="impurity",value=param_impurity)
 
 # Fit and Predict
-randF.fit(pdTrain[features], pdTrain['label'])
-predictions=randF.predict(pdTest[features])
+randF.fit(train_data)
+predictions=randF.predict(test_data)
+
+#log model
+registry = Registry(session=session)
+
+model = registry.log_model(
+    model_name="EDGE2AI_RANDOM_FOREST",
+    model=randF,
+    sample_input_data=test_data, # to provide the feature schema
+    target_platforms={'WAREHOUSE'})
 
 #temp = randF.predict_proba(pdTest[features])
 
@@ -84,14 +100,17 @@ pd.crosstab(pdTest['label'], predictions, rownames=['Actual'], colnames=['Predic
 list(zip(pdTrain[features], randF.feature_importances_))
 
 
-y_true = pdTest['label']
-y_scores = predictions
-auroc = roc_auc_score(y_true, y_scores)
-ap = average_precision_score (y_true, y_scores)
+y_true = predictions['LABEL']
+y_scores = predictions['PREDICTIONS']
+auroc = roc_auc_score(df=predictions, y_true_col_names=['LABEL'], y_score_col_names=['PREDICTIONS'])
+ap = precision_score (df=predictions, y_true_col_names=['LABEL'], y_pred_col_names=['PREDICTIONS'])
 print(auroc, ap)
 
-cdsw.track_metric("auroc", auroc)
-cdsw.track_metric("ap", ap)
+
+#cdsw.track_metric("auroc", auroc)
+model.set_metric(metric_name="auroc", value=auroc)
+model.set_metric(metric_name="ap", value=ap)
+#cdsw.track_metric("ap", ap)
 
 pickle.dump(randF, open("iot_model.pkl","wb"))
 
